@@ -1439,7 +1439,8 @@ class PreTrainedModel(nn.Module, ModuleUtilsMixin, GenerationMixin, PushToHubMix
         if from_pt:
             if state_dict is None:
                 try:
-                    state_dict = torch.load(resolved_archive_file, map_location="cpu")
+                    # Hack to avoid the first `torch.load` when minimzing CPU mem
+                    state_dict = torch.load(resolved_archive_file, map_location="cpu") if not low_cpu_mem_usage else None
                 except Exception as e:
                     try:
                         with open(resolved_archive_file) as f:
@@ -1464,6 +1465,11 @@ class PreTrainedModel(nn.Module, ModuleUtilsMixin, GenerationMixin, PushToHubMix
             #    weights entry - we assume all weights are of the same dtype
             # we also may have config.torch_dtype available, but we won't rely on it till v5
             dtype_orig = None
+
+            # Hack to avoid the first `torch.load` if we want to minimize CPU mem usage
+            if low_cpu_mem_usage:
+                torch_dtype = torch.float32
+
             if torch_dtype is not None:
                 if isinstance(torch_dtype, str):
                     if torch_dtype == "auto":
@@ -1475,9 +1481,8 @@ class PreTrainedModel(nn.Module, ModuleUtilsMixin, GenerationMixin, PushToHubMix
                 dtype_orig = cls._set_default_torch_dtype(torch_dtype)
 
             if low_cpu_mem_usage:
-                # save the keys
-                loaded_state_dict_keys = [k for k in state_dict.keys()]
-                del state_dict  # free CPU memory - will reload again later
+                # There are no keys to save
+                loaded_state_dict_keys = None
 
         config.name_or_path = pretrained_model_name_or_path
 
@@ -1784,7 +1789,7 @@ class PreTrainedModel(nn.Module, ModuleUtilsMixin, GenerationMixin, PushToHubMix
 
         # dematerialize param storage for keys that are going to be replaced by state_dict, by
         # putting those on the meta device
-        for k in loaded_state_dict_keys:
+        for k, _ in model.named_parameters():
             submodule, param_name = find_submodule_and_param_name(model, k)
             if submodule is not None:
                 # selectively switch to the meta device only those params/buffers that will
@@ -1802,10 +1807,11 @@ class PreTrainedModel(nn.Module, ModuleUtilsMixin, GenerationMixin, PushToHubMix
         state_dict = torch.load(resolved_archive_file, map_location="cpu")
 
         # materialize state_dict entries one by one on CPU
-        for k in loaded_state_dict_keys:
+        for k in state_dict.keys():
+            k = f"transformer.{k}"
             submodule, param_name = find_submodule_and_param_name(model, k)
             if submodule is not None:
-                new_val = state_dict[k]
+                new_val = state_dict[k[len("transformer."):]]
                 if isinstance(getattr(submodule, param_name), torch.nn.Parameter):
                     new_val = torch.nn.Parameter(new_val)
                 setattr(submodule, param_name, new_val)
